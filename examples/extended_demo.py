@@ -17,14 +17,19 @@ from apt.utils.datasets import ArrayDataset
 from apt.anonymization.extended_anonymizer import ExtendedAnonymizer
 
 
-def build_synthetic_data(n: int = 500, seed: int = 42) -> pd.DataFrame:
-    """Create a small tabular dataset with numeric and categorical columns."""
+def build_synthetic_data(n: int = 1000, seed: int = 42) -> pd.DataFrame:
+    """Create a small tabular dataset with numeric and categorical columns.
+
+    The sensitive attribute ('disease') is deliberately spread across all
+    combinations of features so that l-diversity can find diverse groups
+    after k-anonymization.
+    """
     rng = np.random.RandomState(seed)
     df = pd.DataFrame({
         "age":       rng.randint(18, 70, size=n).astype(float),
         "income":    rng.randint(20000, 120000, size=n).astype(float),
-        "zipcode":   rng.choice(["10001", "10002", "10003", "10004"], size=n),
-        "education": rng.choice(["HS", "BSc", "MSc", "PhD"], size=n),
+        "zipcode":   rng.choice([0.0, 1.0, 2.0, 3.0], size=n),
+        "education": rng.choice([0.0, 1.0, 2.0, 3.0], size=n),
         "disease":   rng.choice(["flu", "cold", "none", "covid"], size=n),
     })
     return df
@@ -35,28 +40,28 @@ def main():
     # 1. Prepare data                                                     #
     # ------------------------------------------------------------------ #
     print("Building synthetic dataset …")
-    df = build_synthetic_data(n=500, seed=42)
+    df = build_synthetic_data(n=1000, seed=42)
 
     feature_cols = ["age", "income", "zipcode", "education"]
     sensitive_col = "disease"
-    X = df[feature_cols].copy()
-    y = df[sensitive_col].copy()
 
-    # Encode categoricals for the tree (label-encode for simplicity)
-    X_encoded = X.copy()
-    for col in ["zipcode", "education"]:
-        X_encoded[col] = X_encoded[col].astype("category").cat.codes.astype(float)
+    # Train a simple classifier on the features (the "original model")
+    X_train = df[feature_cols].values
+    # Use a numeric target for the tree (label-encode disease)
+    disease_categories = pd.Categorical(df[sensitive_col])
+    y_train = disease_categories.codes.astype(int)
+    disease_mapping = dict(enumerate(disease_categories.categories))
 
-    # Train a simple classifier (the "original model")
-    clf = DecisionTreeClassifier(random_state=0)
-    y_encoded = y.astype("category").cat.codes.values
-    clf.fit(X_encoded.values, y_encoded)
-    predictions = clf.predict(X_encoded.values)
+    clf = DecisionTreeClassifier(random_state=0, max_depth=6)
+    clf.fit(X_train, y_train)
+    predictions = clf.predict(X_train)
 
-    # Build the ArrayDataset expected by Anonymize
-    # We attach the sensitive column back so l-diversity can use it
-    X_full = X_encoded.copy()
-    X_full[sensitive_col] = y_encoded.astype(float)
+    # Build the ArrayDataset expected by Anonymize.
+    # The sensitive column is stored as its numeric code so the array
+    # stays fully numeric (Anonymize rejects mixed-type arrays).
+    # We'll map it back to strings after k-anonymization.
+    X_full = df[feature_cols].copy()
+    X_full[sensitive_col] = disease_categories.codes.astype(float)
     features = list(X_full.columns)
 
     dataset = ArrayDataset(
@@ -72,7 +77,7 @@ def main():
     numerical_qis = ["age", "income"]
 
     ext = ExtendedAnonymizer(
-        k=5,
+        k=10,
         quasi_identifiers=quasi_ids,
         sensitive_attribute=sensitive_col,
         l=2,
